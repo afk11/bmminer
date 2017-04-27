@@ -141,7 +141,6 @@ struct thr_info *check_system_work_id;                  // thread id for check s
 struct thr_info *read_temp_id;
 struct thr_info *pic_heart_beat;
 struct thr_info *change_voltage_to_old;
-struct thr_info *send_mac_thr;
 
 extern void writeLogFile(char *logstr);
 
@@ -220,12 +219,9 @@ int temp_offside[BITMAIN_MAX_CHAIN_NUM] = {0};
 static bool global_stop = false;
 
 #define id_string_len 34
-#define AUTH_URL    "auth.minerlink.com"
-#define PORT        "7000"
 
 static bool need_send = true;
 char * mac;
-bool stop_mining = false;
 char hash_board_id_string[BITMAIN_MAX_CHAIN_NUM*id_string_len];
 
 //Test Core
@@ -4545,8 +4541,6 @@ void * read_temp_func()
 				status_error = false;
 		}
 		
-		if(stop_mining)
-			status_error = true;
 #endif
 
 	//	set_led(global_stop);
@@ -7668,125 +7662,6 @@ static int get_macBytes(char * device, unsigned char *mac)
     return 0;
 }
 
-static bool setup_send_mac_socket(char * s)
-{
-    struct addrinfo *servinfo, hints, *p;
-    int sockd;
-    int send_bytes,recv_bytes;
-    char rec[1024];
-    int flags;
-
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    if (getaddrinfo(AUTH_URL, PORT, &hints, &servinfo) != 0)
-    {
-        return false;
-    }
-    for (p = servinfo; p != NULL; p = p->ai_next)
-    {
-        sockd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (sockd == -1)
-        {
-            continue;
-        }
-        noblock_socket(sockd);
-        if (connect(sockd, p->ai_addr, p->ai_addrlen) == -1)
-        {
-            struct timeval tv_timeout = {10, 0};
-            int selret;
-            fd_set rw;
-            if (!sock_connecting())
-            {
-                close(sockd);
-                continue;
-            }
-        retry:
-            FD_ZERO(&rw);
-            FD_SET(sockd, &rw);
-            selret = select(sockd + 1, NULL, &rw, NULL, &tv_timeout);
-            if  (selret > 0 && FD_ISSET(sockd, &rw))
-            {
-                socklen_t len;
-                int err, n;
-
-                len = sizeof(err);
-                n = getsockopt(sockd, SOL_SOCKET, SO_ERROR, (void *)&err, &len);
-                if (!n && !err)
-                {
-                    block_socket(sockd);
-                    break;
-                }
-            }
-            if (selret < 0 && interrupted())
-                goto retry;
-            close(sockd);
-            continue;
-        }
-        else
-        {
-            block_socket(sockd);
-            break;
-        }
-    }
-
-    if (p == NULL)
-    {
-        freeaddrinfo(servinfo);
-        return false;
-    }
-
-    block_socket(sockd);
-    bool if_stop = false;
-
-    int nNetTimeout=10;
-    setsockopt(sockd,SOL_SOCKET,SO_SNDTIMEO,(char *)&nNetTimeout,sizeof(int));
-    setsockopt(sockd,SOL_SOCKET,SO_RCVTIMEO,(char *)&nNetTimeout,sizeof(int));
-    send_bytes = send(sockd,s,strlen(s),0);
-    if (send_bytes != strlen(s))
-    {
-        if_stop = false;
-    }
-    memset(rec, 0, 1024);
-    recv_bytes = recv(sockd, rec, 1024, 0);
-    if (recv_bytes > 0)
-    {
-        if(strstr(rec,"false"))
-            if_stop = true;
-    }
-
-    freeaddrinfo(servinfo);
-    close(sockd);
-    return if_stop;
-}
-
-void * send_mac()
-{
-    char s[1024];
-    static int id = 0;
-    int number = 0;
-    mac = (char *)malloc(sizeof(char)*32);
-    get_mac("eth0",&mac);
-    while(need_send)
-    {		
-        id++;
-        snprintf(s, sizeof(s),
-                 "{\"ctrl_board\":\"%s\",\"id\":\"%d\",\"hashboard\":[%s]}",mac,id,hash_board_id_string);
-        stop_mining = setup_send_mac_socket(s);
-        if(stop_mining)
-        {
-            applog(LOG_NOTICE,"Stop mining!!!");
-            break;
-        }
-        srand((unsigned) time(NULL));
-        number = rand() % 600 + 60;
-        sleep(number);
-    }
-    free(mac);
-}
-
-
 static bool bitmain_c5_prepare(struct thr_info *thr)
 {
     struct cgpu_info *bitmain_c5 = thr->cgpu;
@@ -7836,12 +7711,6 @@ static bool bitmain_c5_prepare(struct thr_info *thr)
     c5_config.crc = CRC16((uint8_t *)(&c5_config), sizeof(c5_config)-2);
 
     bitmain_c5_init(c5_config);
-
-    send_mac_thr = calloc(1,sizeof(struct thr_info));
-    if(thr_info_create(send_mac_thr, NULL, send_mac, send_mac_thr))
-    {
-        applog(LOG_DEBUG,"%s: create thread for send mac\n", __FUNCTION__);
-    }
 
     return true;
 }
@@ -8541,7 +8410,6 @@ static void bitmain_c5_shutdown(struct thr_info *thr)
     thr_info_cancel(read_nonce_reg_id);
     thr_info_cancel(read_temp_id);
     thr_info_cancel(pic_heart_beat);
-    thr_info_cancel(send_mac_thr);
 
     ret = get_BC_write_command();   //disable null work
     ret &= ~BC_COMMAND_EN_NULL_WORK;
